@@ -55,14 +55,32 @@ function Window (options) {
     features.push("resizable=" + trueIsYes(options.resizable));
     features.push("menubar=" + trueIsYes(options.menubar));
 
+    console.log(">>> openWindow=" + options.url);
     var window = ww.openWindow(null, options.url, null, features.join(","), null);
     this._window = window;
+    // XXX a dangerously simplistic approach
+    if (options.injectProps) {
+        for (var k in options.injectProps) {
+            window[k] = options.injectProps[k];
+        }
+    }
     this.options = options;
+    window.addEventListener("close", this, false);
 }
 Window.prototype = {
     close: function () {
         this._window.close();
-    }
+    },
+    handleEvent: function handleEvent (event) {
+        switch (event.type) {
+            case "close":
+                if (event.target == this._window) {
+                    this._window.removeEventListener("close", this, false);
+                    if (this.options.onclose) this.options.onclose();
+                }
+                break;
+        };
+    },
 };
 
 exports.open = function (options) {

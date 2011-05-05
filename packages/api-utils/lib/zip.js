@@ -48,53 +48,106 @@ const {Cc,Ci,Cr}    = require("chrome"),
 //  - docs
 //  - tests
 //  - not sure that we can read and write at the same time, but giving it a shot
+//  - in order to make sure that we're always synced, we systematically open and close the archive
+//    for every single operation. In the real world that's a bad idea, will have to figure out
+//    a better approach
+var compression;
 function ZipHandle (path) {
-    var file = Cc['@mozilla.org/file/local;1'].createInstance(Ci.nsILocalFile);
-    file.initWithPath(path);
+    this.file = Cc['@mozilla.org/file/local;1'].createInstance(Ci.nsILocalFile);
+    this.file.initWithPath(path);
     this.zipReader = Cc['@mozilla.org/libjar/zip-reader;1'].createInstance(Ci.nsIZipReader);
-    this.zipReader.open(file);
+    // this.zipReader.open(file);
     this.zipWriter = Cc['@mozilla.org/zipwriter;1'].createInstance(Ci.nsIZipWriter);
-    this.compression = Ci.nsIZipWriter.COMPRESSION_BEST;
+    compression = Ci.nsIZipWriter.COMPRESSION_BEST;
     // this is PR_RDWR | PR_SYNC
-    this.zipWriter.open(file, 0x04 | 0x40);
+    // this.zipWriter.open(file, 0x04 | 0x40);
 }
 ZipHandle.prototype = {
+    _writerOp:    function (op) {
+        var wasOpen = false;
+        try {
+            this.zipWriter.open(this.file, 0x04 | 0x40);
+        }
+        catch (e) {
+            wasOpen = true;
+        }
+        console.log("wasOpen(writer) for " + op.name + "=" + wasOpen);
+        // this is PR_RDWR | PR_SYNC
+        var res = op();
+        if (!wasOpen) this.zipWriter.close();
+        return res;
+    },
+    _readerOp:    function (op) {
+        var wasOpen = false;
+        try {
+            this.zipReader.open(this.file);
+        }
+        catch (e) {
+            wasOpen = true;
+        }
+        console.log("wasOpen(reader) for " + op.name + "=" + wasOpen);
+        var res = op();
+        if (!wasOpen) this.zipReader.close();
+        return res;
+    },
     allEntryPaths:  function () {
-        var enum = this.zipReader.findEntries("*");
-        var paths = [];
-        while (enum.hasMore()) paths.push(enum.getNext());
-        return paths;
+        var self = this;
+        return this._readerOp(function allEntryPaths () {
+            var enum = self.zipReader.findEntries("*");
+            var paths = [];
+            while (enum.hasMore()) paths.push(enum.getNext());
+            return paths;
+        });
     },
     entryAsText:    function (path, charset) {
-        if (!this.hasEntry(path)) return null;
-        var is = this.entryAsStream(path);
-        var tr = new ts.TextReader(is, charset);
-        return tr.read();
+        var self = this;
+        return this._readerOp(function entryAsText () {
+            if (!self.hasEntry(path)) return null;
+            var is = self.entryAsStream(path);
+            var tr = new ts.TextReader(is, charset);
+            var res = tr.read();
+            self.zipReader.close();
+            return res;
+        });
     },
     entryAsBinary:  function (path) {
-        if (!this.hasEntry(path)) return null;
-        var is = this.entryAsStream(path);
-        var br = new bs.ByteReader(is);
-        return br.read();
+        var self = this;
+        return this._readerOp(function entryAsBinary () {
+            if (!self.hasEntry(path)) return null;
+            var is = self.entryAsStream(path);
+            var br = new bs.ByteReader(is);
+            var res = br.read();
+            self.zipReader.close();
+            return res;
+        });
     },
     // not documented on purpose, internal
     entryAsStream:    function (path) {
-        var entry = this.zipReader.getEntry(path);
-        return this.zipReader.getInputStream(entry);
+        // only works with already open archive
+        return this.zipReader.getInputStream(path);
     },
     hasEntry:    function (path) {
-        return this.zipReader.hasEntry(path);
+        var self = this;
+        return this._writerOp(function hasEntry () {
+            return self.zipWriter.hasEntry(path);
+        });
     },
     addDirectory:    function (path) {
-        this.zipWriter.addEntryDirectory(path, Date.now() * 1000, false);
+        var self = this;
+        return this._writerOp(function addDirectory () {
+            self.zipWriter.addEntryDirectory(path, Date.now() * 1000, false);
+        });
     },
     addEntryFromText:    function (path, string, charset) {
-        charset = charset ? charset : "UTF-8";
-        var converter = Cc["@mozilla.org/intl/scriptableunicodeconverter"]
-                          .createInstance(Ci.nsIScriptableUnicodeConverter);
-        converter.charset = charset;
-        var is = converter.convertToInputStream(string);
-        this.addEntryFromStream(path, is);
+        var self = this;
+        return this._writerOp(function addEntryFromText () {
+            charset = charset ? charset : "UTF-8";
+            var converter = Cc["@mozilla.org/intl/scriptableunicodeconverter"]
+                              .createInstance(Ci.nsIScriptableUnicodeConverter);
+            converter.charset = charset;
+            var is = converter.convertToInputStream(string);
+            self.addEntryFromStream(path, is);
+        });
     },
     addEntryFromBinary:    function (path, string) {
         // XXX
@@ -102,15 +155,22 @@ ZipHandle.prototype = {
     },
     // not documented on purpose, internal
     addEntryFromStream:    function (path, stream) {
-        this.zipWriter.addEntryStream(path, Date.now() * 1000, this.compression, stream, false);
+        var self = this;
+        return this._writerOp(function addEntryFromStream () {
+            self.removeEntry(path);
+            self.zipWriter.addEntryStream(path, Date.now() * 1000, compression, stream, false);
+        });
     },
     removeEntry:    function (path) {
-        if (!this.hasEntry(path)) return;
-        this.zipWriter.removeEntry(path, false);
+        var self = this;
+        return this._writerOp(function removeEntry () {
+            if (!self.zipWriter.hasEntry(path)) return;
+            self.zipWriter.removeEntry(path, false);
+        });
     },
     close:    function () {
-        this.zipReader.close();
-        this.zipWriter.close();
+        try { this.zipReader.close(); } catch (e) {}
+        try { this.zipWriter.close(); } catch (e) {}
     },
 };
 
