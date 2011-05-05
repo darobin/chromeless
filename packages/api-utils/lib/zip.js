@@ -40,7 +40,7 @@
 const {Cc,Ci,Cr}    = require("chrome"),
       xpcom         = require("xpcom"),
       ts            = require("text-streams"),
-      bs            = require("btye-streams");
+      bs            = require("byte-streams");
 
 
 // XXX
@@ -48,14 +48,15 @@ const {Cc,Ci,Cr}    = require("chrome"),
 //  - docs
 //  - tests
 //  - not sure that we can read and write at the same time, but giving it a shot
-function ZipHandle (nsZip) {
+function ZipHandle (path) {
     var file = Cc['@mozilla.org/file/local;1'].createInstance(Ci.nsILocalFile);
     file.initWithPath(path);
     this.zipReader = Cc['@mozilla.org/libjar/zip-reader;1'].createInstance(Ci.nsIZipReader);
     this.zipReader.open(file);
     this.zipWriter = Cc['@mozilla.org/zipwriter;1'].createInstance(Ci.nsIZipWriter);
     this.compression = Ci.nsIZipWriter.COMPRESSION_BEST;
-    this.zipWriter.open(file);
+    // this is PR_RDWR | PR_SYNC
+    this.zipWriter.open(file, 0x04 | 0x40);
 }
 ZipHandle.prototype = {
     allEntryPaths:  function () {
@@ -88,7 +89,7 @@ ZipHandle.prototype = {
         this.zipWriter.addEntryDirectory(path, Date.now() * 1000, false);
     },
     addEntryFromText:    function (path, string, charset) {
-        charset ||= "UTF-8";
+        charset = charset ? charset : "UTF-8";
         var converter = Cc["@mozilla.org/intl/scriptableunicodeconverter"]
                           .createInstance(Ci.nsIScriptableUnicodeConverter);
         converter.charset = charset;
